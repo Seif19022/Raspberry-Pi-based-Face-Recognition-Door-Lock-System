@@ -1,0 +1,222 @@
+import face_recognition
+import cv2
+import os
+import time
+import pickle
+from picamera2 import Picamera2
+from deepface import DeepFace
+import numpy as np
+import socket
+import RPi.GPIO as GPIO
+import threading
+import psutil
+
+# Paths
+dataset_path = "/home/seif/SEIF"
+encodings_file = "/home/seif/face_encodings.pkl"
+
+# Notification settings
+LAPTOP_IP = "172.20.10.2"  # Replace with your laptop's actual IP
+LAPTOP_PORT = 5000
+
+# Relay GPIO pin
+RELAY_PIN = 17  # GPIO pin connected to the relay IN pin
+
+# Set up GPIO
+GPIO.setmode(GPIO.BCM)  # Use BCM numbering
+GPIO.setup(RELAY_PIN, GPIO.OUT)  # Set RELAY_PIN as an output
+GPIO.output(RELAY_PIN, GPIO.LOW)  # Initialize with the relay off
+
+# Threading event for graceful termination
+exit_event = threading.Event()
+
+# Function to save encodings to a file
+def save_encodings_to_file(encodings, names, file_path):
+    with open(file_path, 'wb') as f:
+        pickle.dump((encodings, names), f)
+
+
+# Function to control the solenoid lock
+def activate_solenoid_lock():
+    def lock_action():
+        GPIO.output(RELAY_PIN, GPIO.HIGH)  # Activate relay (unlock)
+        time.sleep(5)  # Keep the lock open for 5 seconds
+        GPIO.output(RELAY_PIN, GPIO.LOW)  # Deactivate relay (lock)
+    threading.Thread(target=lock_action).start()
+
+# Persistent notification client
+class NotificationClient:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.client_socket = None
+        self.connect()
+
+    def connect(self):
+        try:
+            self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client_socket.connect((self.ip, self.port))
+            
+        except Exception as e:
+            print(f"Error connecting to notification server: {e}")
+
+    def send(self, message):
+        try:
+            if self.client_socket:
+                self.client_socket.sendall(message.encode('utf-8'))
+        except Exception as e:
+           
+            self.connect()  # Reconnect if there's an error
+
+    def close(self):
+        if self.client_socket:
+            self.client_socket.close()
+            print("Notification socket closed.")
+
+# Instantiate the NotificationClient
+notification_client = NotificationClient(LAPTOP_IP, LAPTOP_PORT)
+
+# Function to dynamically adjust frame skipping based on CPU usage
+def get_dynamic_frame_skip():
+    cpu_usage = psutil.cpu_percent(interval=0.1)
+    if cpu_usage > 80:
+        return 10  # Higher skip if CPU is overloaded
+    elif cpu_usage > 50:
+        return 5
+    else:
+        return 3  # Lower skip for smoother processing
+
+# Enhanced lighting condition adaptation function
+def apply_lighting_adaptation(frame):
+    # Convert to LAB color space
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    # Apply CLAHE to the L-channel
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l)
+
+    # Merge the enhanced L-channel back
+    lab = cv2.merge((cl, a, b))
+    enhanced_frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    return enhanced_frame
+
+# Load existing encodings or create new ones
+known_face_encodings, known_face_names = [], []
+if os.path.exists(encodings_file):
+    with open(encodings_file, 'rb') as f:
+        known_face_encodings, known_face_names = pickle.load(f)
+
+# Initialize Picamera2
+picam2 = Picamera2()
+camera_config = picam2.create_preview_configuration(main={"size": (640, 480)})
+picam2.configure(camera_config)
+picam2.start()
+time.sleep(1.5)
+
+_ = DeepFace.analyze(np.zeros((48, 48, 3)), actions=["emotion"], enforce_detection=False)
+
+# Frame skipping and processing variables
+total_frames_processed = 0
+previous_emotion = "N/A"
+unknown_face_detected = False
+new_face_encoding = None
+
+# Function for processing video frames
+def process_video():
+    global total_frames_processed, previous_emotion, unknown_face_detected, new_face_encoding
+    while not exit_event.is_set():
+        frame = picam2.capture_array()
+
+        if frame is None:
+            print("Error capturing frame.")
+            break
+
+        # Enhance lighting conditions
+        frame = apply_lighting_adaptation(frame)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Resize frame for faster face detection
+        small_frame = cv2.resize(rgb_frame, (0, 0), fx=0.25, fy=0.25)
+        face_locations = face_recognition.face_locations(small_frame, model="hog")
+        face_locations = [(top * 4, right * 4, bottom * 4, left * 4) for (top, right, bottom, left) in face_locations]
+        
+        if not face_locations:
+            unknown_face_detected = False
+
+
+        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+        
+
+        for i, (face_encoding, face_location) in enumerate(zip(face_encodings, face_locations)):
+            face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
+            name = "Unknown"
+
+            if face_distances.size > 0:
+                best_match_index = face_distances.argmin()
+                best_match_distance = face_distances[best_match_index]
+
+                if best_match_distance < 0.4:
+                    name = known_face_names[best_match_index]
+                    activate_solenoid_lock()
+                    print(f"Access granted for {name}!")
+                    notification_client.send(f"Access granted for {name}!")
+                    known_face_encodings[best_match_index] = face_encoding
+                    print(f"Updated {name}'s face encodings for improved recognition.")
+                    unknown_face_detected = False
+                else:
+                    unknown_face_detected = True
+                    new_face_encoding = face_encoding
+                    notification_client.send("Unknown face detected!")
+
+            if total_frames_processed % get_dynamic_frame_skip() == 0:
+                try:
+                    top, right, bottom, left = face_location
+                    face_region = rgb_frame[top:bottom, left:right]
+                    emotion_result = DeepFace.analyze(face_region, actions=["emotion"], enforce_detection=False)
+                    previous_emotion = emotion_result[0]["dominant_emotion"]
+                    notification_client.send(f"Detected emotion: {previous_emotion}")
+                except Exception as e:
+                    print("Error in emotion detection:", e)
+
+            top, right, bottom, left = face_location
+            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+            cv2.putText(frame, f"{name} - {previous_emotion}", (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        if unknown_face_detected:
+            cv2.putText(frame, "Unknown face detected! Press 'a' to authorize, 'q' to quit.", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        cv2.imshow('Video', frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            exit_event.set()
+            break
+        elif key == ord('a') and unknown_face_detected:
+            new_name = input("Enter the name for the new authorized person: ")
+            known_face_encodings.append(new_face_encoding)
+            known_face_names.append(new_name)
+            save_encodings_to_file(known_face_encodings, known_face_names, encodings_file)
+            print(f"{new_name} added to the authorized list.")
+            unknown_face_detected = False  # Reset after adding
+
+        total_frames_processed += 1
+
+# Start the video processing thread
+video_thread = threading.Thread(target=process_video)
+video_thread.start()
+
+# Wait for the thread to complete
+try:
+    video_thread.join()
+finally:
+    print("Stopping threads...")
+    exit_event.set()
+    for thread in threading.enumerate():
+        if thread is not threading.main_thread():
+            thread.join(timeout=1)
+    print("Cleaning up resources...")
+    notification_client.close()  # Close the notification client
+    GPIO.cleanup()
+    picam2.stop()
+    cv2.destroyAllWindows()
+    print("Exiting program.")

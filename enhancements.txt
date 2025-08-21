@@ -1,0 +1,22 @@
+1. Adaptive Face Recognition (Learning Over Time)
+
+3. Emotion Detection (Software-Only)
+
+
+5. Recognition with Varying Distance and Scaling
+6. Lighting Condition Adaptation (Advanced Preprocessing)
+7. Real-Time Notifications (Without App) (Remote Notifications:
+You could trigger a notification on your laptop or phone with a text-to-speech message when the Raspberry Pi recognizes a face. This way, the voice feedback occurs on your connected device, not the Raspberry Pi.)
+8. Multiple Authorized Faces (Without Retraining)
+
+
+1. and 8.  it learns every time it sees my face it learn more features and also for any unknow user it asks me if i want to add it as an authorized face and name it.
+
+Batch Load the Dataset: Instead of loading and encoding all 120 images every time you run the script, you can precompute the encodings and save them to disk. This way, when the script starts, it will just load the encodings from a file rather than reprocessing the images each time.
+
+Example: Save encodings to a file (e.g., using pickle)
+
+3. done emotion detection using deepface for emotions for all faces authorized and non authorized
+
+
+5. done on with Varying Distance and Scaling
