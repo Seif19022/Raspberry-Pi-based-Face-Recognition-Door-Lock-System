@@ -96,7 +96,7 @@ Authorized face → GPIO HIGH → Opens lock for 5 seconds
 
 
 ---
-
+```bash
 🛠️ Installation & Setup
 1. Install dependencies**
 
