@@ -94,14 +94,12 @@ Authorized face → GPIO HIGH → Opens lock for 5 seconds
 │── final script.txt # Full Raspberry Pi code (facial recognition + lock control)
 
 
-> You can rename `final script.txt` → `main.py` for a cleaner repo.
 
 ---
 
-## 🛠️ Installation & Setup
+🛠️ Installation & Setup
+1. Install dependencies**
 
-### **1. Install dependencies**
-```bash
 pip install opencv-python face_recognition deepface psutil picamera2
 
 2. Enable Raspberry Pi camera
